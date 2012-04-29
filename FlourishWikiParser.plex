@@ -1,0 +1,1033 @@
+<?php
+class FlourishWikiParser extends WikiParser
+{
+	/**
+	 * Finishes up parsing
+	 * 
+	 * @return void
+	 */
+	protected function finishParsing()
+	{
+		if (isset($this->cache['blockquote_content']) && strlen($this->cache['blockquote_content'])) {
+			$this->handleBlockquote();
+		}
+	}
+	
+	/**
+	 * Recursively parses a blockquote to allow for nested formatting
+	 * 
+	 * @return void
+	 */
+	protected function handleBlockquote()
+	{
+		$content = $this->cache['blockquote_content'];
+		$this->cache['blockquote_content'] = '';
+		
+		$content_parser = new self($content, $this->data);
+		$descendants = $content_parser->parse();
+		
+		foreach (new ParserIterator($descendants) as $decendant) {
+			$decendant->index = $this->index_counter++;
+		}
+		$this->tip->children = array_merge($this->tip->children, $descendants->children);
+	}
+	
+	/**
+	 * Adds an image tag to the tree
+	 * 
+	 * @param string $string  The wiki image tag, e.g. {{src|Alt Attribute}}
+	 * @return void
+	 */
+	protected function handleImage($string)
+	{
+		$parts = explode('|', substr($string, 2, -2), 2);
+		$url   = trim($parts[0]);
+		$alt   = isset($parts[1]) ? trim($parts[1]) : '';
+		$this->openTag('img', array('src' => $url, 'alt' => $alt));
+	}
+
+	protected function handleBlockStart($string)
+	{
+		preg_match('#\{\{\{(\s*\#!([\w-]+)[ \t]*)?\n#', $string, $match);
+		if (isset($match[2])) {
+			$lang = $match[2];
+			if ($lang != 'raw') {
+				if ($lang == 'text/html') {
+					$lang = 'html';
+				}
+				$lang = preg_replace('#[^a-z0-9\-_/]#i', '', $lang);
+				$this->openTag('block', array('class' => 'block ' . $lang));
+				$this->cache['block_encode'] = TRUE;
+			} else {
+				$this->openTag('raw');
+				$this->cache['block_encode'] = FALSE;
+			}
+		} else {
+			$this->openTag('block');
+			$this->cache['block_encode'] = TRUE;
+		}
+	}
+
+	protected function handleBlockEnd()
+	{
+		$this->closeTag('block');
+	}
+	
+	protected function handleURL($string)
+	{
+		$this->openTag('link', array('href' => $string));
+		$this->handleString($string);
+		$this->closeTag('link');
+	}
+	
+	protected function handleDomain($string)
+	{
+		$this->openTag('link', array('href' => 'http://' . $string));
+		$this->handleString($string);
+		$this->closeTag('link');
+	}
+
+	protected function handleFlourishClass($string)
+	{
+		if (isset($this->data['flourish_class']) && $string == $this->data['flourish_class']) {
+			$this->handleString($string);
+			return;
+		}
+		$this->openTag('link', array('href' => '/docs/' . $string));
+		$this->handleString($string);
+		$this->closeTag('link');
+	}
+
+	protected function handleFlourishMethod($string)
+	{
+		$method_name = preg_replace('#^::(.*)\(\)$#', '\1', $string);
+		$class_name  = $this->data['flourish_class'];
+		$this->openTag('link', array('href' => '/api/' . $class_name . '#' . $method_name));
+		$this->openTag('mono');
+		$this->handleString(preg_replace('#^::#', '', $string));
+		$this->closeTag('mono');
+		$this->closeTag('link');
+	}
+
+	protected function handleFlourishClassMethod($string)
+	{
+		$method_name = preg_replace('#^(f[a-zA-Z0-9]+)::(.*)\(\)$#', '\2', $string);
+		$class_name  = preg_replace('#^(f[a-zA-Z0-9]+)::(.*)\(\)$#', '\1', $string);
+		$this->openTag('link', array('href' => '/api/' . $class_name . '#' . $method_name));
+		$this->handleString($string);
+		$this->closeTag('link');
+	}
+	
+	protected function handleEmail($string)
+	{
+		$this->openTag('link', array('href' => 'mailto:' . $string));
+		$this->handleString($string);
+		$this->closeTag('link');
+	}
+	
+	protected function handleCell()
+	{
+		$current_row  = $this->cache['current_row'];
+		$current_cell = $this->cache['current_cell'];
+		$cell_row = $this->cache['current_cell_rows'][$current_cell];
+		
+		if ($cell_row < $this->cache['current_row']) {
+			$this->cache['rows'][$cell_row][$current_cell]['rowspan'] = $this->cache['current_row'] - $cell_row + 1;
+			$this->cache['rows'][$current_row][$current_cell] = array('content' => NULL, 'type' => 'placeholder', 'align' => NULL, 'rowspan' => 0, 'colspan' => 0, 'line' => NULL);
+		}
+		
+		if ($this->cache['rows'][$cell_row][$current_cell]['type'] == 'temp') {
+			$this->cache['rows'][$cell_row][$current_cell]['type'] = 'td';
+		}
+		
+		if ($this->cache['table_line'] != $this->cache['rows'][$cell_row][$current_cell]['line']) {
+			$this->cache['rows'][$cell_row][$current_cell]['content'] .= "\n";
+			$this->cache['rows'][$cell_row][$current_cell]['line']++;
+		}
+		$this->cache['rows'][$cell_row][$current_cell]['content'] .= $this->value;
+		
+		// This removes trailing = from th cells
+		if ($this->cache['rows'][$cell_row][$current_cell]['type'] == 'th' && $this->value == '=' && strlen($this->cache['rows'][$cell_row][$current_cell]['content'])) {
+			$this->cache['rows'][$cell_row][$current_cell]['content'] = substr($this->cache['rows'][$cell_row][$current_cell]['content'], 0, -1) . ' ';
+		}
+	}
+	
+	protected function openParagraph()
+	{
+		if ($this->getOpenTagPos('p') === FALSE) {
+			$this->openTag('p');
+		} else {
+			$this->handleString(' ');
+		}
+		$this->yypushstate(self::INLINESTATE);
+	}
+	
+	protected function openPlugin()
+	{
+		$plugin_tag = $this->openTag('plugin');
+		$this->cache['plugin_tag'] = $plugin_tag;
+		$this->yypushstate(self::PLUGINSTATE);
+	}
+	
+	protected function getTotalWidth($avg_widths, $j, $distance)
+	{
+		$total = 0;
+		for ($i=0; $i<$distance; $i++) {
+			$total += $avg_widths[$j+$i];
+		}
+		return $total + $distance - 1;
+	}
+
+/*!lex2php
+%counter $this->counter
+%input $this->input
+%token $this->token
+%value $this->value
+%line $this->line
+heading = #[ \t]*=+[ \t]*#
+header_id = /\s*#[\w+_-]+/
+escape = #~.#
+bold = #'''#
+italic = #''#
+mono = /##/
+sub = #,,#
+sup = #\^\^#
+underline = #__#
+break = #\\\\#
+hr = #[ \t]*-{4,}[ \t]*\n#
+url = #https?://[a-zA-Z0-9%\$\-_.+!*;/?:@=&\'\#,]+[a-zA-Z0-9\$\-_+!*;/?:@=&\'\#,]#
+wwwurl = #www\.(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}(?:/[a-zA-Z0-9%\$\-_.+!*;/?:@=&\'\#,]+[a-zA-Z0-9\$\-_+!*;/?:@=&\'\#,])?#
+email = #([a-zA-Z0-9\\.+\'_\\-]+@(?:[a-zA-Z0-9\\-]+\.)+[a-zA-Z]{2,})#
+link = #\[((?!\]| ).)+(?: (?:(?!\]).)+)?\]#
+linkstart = #\[#
+linkurl = #((?!\]| ).)+#
+linkdivider = #\s+#
+linkend = #\s*\]+#
+flourish_class_link = #\b(f[A-Z0-9][a-zA-Z0-9_]*)(?![:a-zA-Z0-9_])#
+flourish_method_link = #::([a-zA-Z_][a-zA-Z0-9_]*)\(\)#
+flourish_class_method_link = #\b(f[A-Z0-9][a-zA-Z0-9_]*)::([a-zA-Z_][a-zA-Z0-9_]*)\(\)#
+img = #\{\{[^|]+(?:\|(?:(?!\}\}).)+)?\}\}+#
+divstart = /(\(\(\(|\[\[\[)[ \t]*\n/
+divend = /(\)\)\)|\]\]\])[ \t]*\n/
+nowikistart = /(\{\{\{|`)(?!(#![\w-]+)?[ \t]*\n)/
+innowiki = #((?!\}\}\}|`).)+#
+nowikiend = /(\}\}\}+|`)/
+blockstart = /\{\{\{(\s*#!([\w-]+)[ \t]*)?\n/
+inblock = #((?!\n\}\}\}(?!\})).)+#
+blockend = #\n\}\}\}#
+liststart = /[ \t]*([*#+-](\d\.)?|\d\.)[ \t]?/
+listparagraph = /\n[ \t]+\n[ \t]+/
+listitemcontinue = /\n[ \t]+(?![ \t*#+-]|\d+\.)/
+listcontinue = /\n[ \t]*([*#+-]+(\d+\.)?|\d+\.)[ \t]?/
+defliststart = #;[ \t]*#
+deflisttermend = #\n?[ \t]*:[ \t]*#
+deflistnewdef = #[ \t]*\n[ \t]*:[ \t]*#
+deflistcontinue = #\n[ \t]*;[ \t]*#
+tablestart = /\|-[|+-]*(?=\|)|\|=?(>|<|~(?!~))?/
+tablebordercontinue = /\|[ \t]*\n(?=\||\+)/
+tableborderend = /\|(?=[ \t]*\n(?!\||\+))/
+tableborder = /(\|-[|+-]*(?=\|)|\+-[|+-]*(?=\+|\|)|\|=?(>|<|~(?!~))?)/
+tablecontinue = /\n(?=\||\+)/
+blockquotestart = /(\:+|>+)/
+blockquotecontinue = #\n(\:+|>+)?#
+blockquoteend = #\n{2,}#
+pluginstart = #<<\s*(?=\w+(\s+\w+(=([a-zA-Z0-9]+|'(\\'|[^']+)*'|"(?:\\"|[^"]+)*"))?)*>>)#
+pluginname = #[a-z]\w*#
+pluginattr = #\s+\w+(=([a-zA-Z0-9]+|'(\\'|[^']+)*'|"(?:\\"|[^"]+)*"))?#
+pluginend = #\s*>>#
+p = #\n{2,}#
+multi_newline = #\n+#
+newline = #\n#
+other = #[a-zA-Z0-9 \t]+|[^a-zA-Z0-9 \t\n\r]#
+other_space = #[a-zA-Z0-9]+|[^a-zA-Z0-9\n\r]#
+*/
+/*!lex2php
+%statename NEWLINESTATE
+heading {
+	$this->openTag('heading');
+	$this->tip->data[0] = $this->tip->data[1] = strlen(trim($this->value));
+	$this->yypushstate(self::HEADINGSTATE);
+}
+hr { $this->openTag('hr'); }
+divstart { $this->openTag('div'); }
+divend { $this->closeTag('div'); }
+blockstart {
+	$this->handleBlockStart($this->value);
+	$this->yypushstate(self::BLOCKSTATE);
+}
+bold {
+	$this->openParagraph();
+	return true;
+}
+mono {
+	$this->openParagraph();
+	return true;
+}
+liststart {
+	$value = str_replace("\t", "    ", $this->value);
+	
+	$this->cache['list_ws_stack'] = array();
+	$this->cache['list_ws_stack'][] = strlen($value) - strlen(ltrim($value));
+	
+	$type = trim($value);
+	$type = preg_replace('#\d+\.#', '#', $type);
+	$this->openTag($type == '#' ? 'ol' : 'ul');
+	$this->openTag('li');
+	$this->yypushstate(self::LISTSTATE);
+}
+defliststart {
+	$this->openTag('dl');
+	$this->openTag('dt');
+	$this->yypushstate(self::DEFLISTTERMSTATE);
+}
+tablestart {
+	$this->openTag('table');
+	$this->cache['table_line'] = -1;
+	$this->yypushstate(self::TABLESTATE);
+	return true;
+}
+flourish_method_link {
+	$this->openParagraph();
+	return true;
+}
+blockquotestart {
+	for ($i=0; $i < strlen($this->value); $i++) {
+		$this->openTag('blockquote');
+	}
+	$this->cache['blockquote_depth'] = strlen($this->value);
+	$this->cache['blockquote_content'] = '';
+	$this->yypushstate(self::BLOCKQUOTESTATE);
+}
+multi_newline { return FALSE; }
+other {
+	$this->openParagraph();
+	return true;
+}
+*/
+/*!lex2php
+%statename HEADINGSTATE
+escape { $this->handleString(substr($this->value, 1)); }
+pluginstart { $this->openPlugin(); }
+linkstart {
+	$this->openTag('link');
+	$this->yypushstate(self::LINKSTATE);
+}
+url { $this->handleURL($this->value); }
+wwwurl { $this->handleDomain($this->value); }
+email { $this->handleEmail($this->value); }
+bold { $this->handleTag('bold'); }
+italic { $this->handleTag('italic'); }
+mono { $this->handleTag('mono'); }
+sup { $this->handleTag('sup'); }
+sub { $this->handleTag('sub'); }
+underline { $this->handleTag('underline'); }
+nowikistart {
+	$this->openTag('nowiki');
+	$this->yypushstate(self::NOWIKISTATE);
+}
+header_id {
+	$this->tip->attr['id'] = substr(trim($this->value), 1);
+}
+heading { return false; }
+multi_newline {
+	$this->generateId($this->tip);
+	$this->closeTag('heading');
+	$this->yypopstate();
+}
+other_space { $this->handleString($this->value); }
+*/
+/*!lex2php
+%statename INLINESTATE
+escape { $this->handleString(substr($this->value, 1)); }
+pluginstart { $this->openPlugin();  }
+url { $this->handleURL($this->value); }
+wwwurl { $this->handleDomain($this->value); }
+email { $this->handleEmail($this->value); }
+bold { $this->handleTag('bold'); }
+italic { $this->handleTag('italic'); }
+mono { $this->handleTag('mono'); }
+sup { $this->handleTag('sup'); }
+sub { $this->handleTag('sub'); }
+underline { $this->handleTag('underline'); }
+break { $this->openTag('br'); }
+flourish_class_link { $this->handleFlourishClass($this->value); }
+flourish_method_link { $this->handleFlourishMethod($this->value); }
+flourish_class_method_link { $this->handleFlourishClassMethod($this->value); }
+linkstart {
+	$this->openTag('link');
+	$this->yypushstate(self::LINKSTATE);
+}
+blockstart {
+	$this->closeTag('p');
+	$this->handleBlockStart($this->value);
+	$this->yypushstate(self::BLOCKSTATE);
+}
+nowikistart {
+	$this->openTag('nowiki');
+	$this->yypushstate(self::NOWIKISTATE);
+}
+img { $this->handleImage($this->value); }
+p { $this->closeTag('p'); $this->yypopstate(); }
+multi_newline { $this->yypopstate(); }
+other_space { $this->handleString($this->value); }
+*/
+/*!lex2php
+%statename BLOCKQUOTESTATE
+escape { $this->cache['blockquote_content'] .= $this->value; }
+blockquoteend {
+	$this->handleBlockquote();
+	while ($this->cache['blockquote_depth']--) {
+		$this->closeTag('blockquote');
+	}
+	unset($this->cache['blockquote_depth']);
+	$this->yypopstate();
+}
+blockquotecontinue {
+	$new_depth = trim($this->value) ? strlen(trim($this->value)) : $this->cache['blockquote_depth'];
+	if ($new_depth > $this->cache['blockquote_depth']) {
+		$this->handleBlockquote();
+		while ($new_depth > $this->cache['blockquote_depth']) {
+			$this->openTag('blockquote');
+			$this->cache['blockquote_depth']++;
+		}
+	} elseif ($new_depth < $this->cache['blockquote_depth']) {
+		$this->handleBlockquote();
+		while ($new_depth < $this->cache['blockquote_depth']) {
+			$this->closeTag('blockquote');
+			$this->cache['blockquote_depth']--;
+		}
+	} else {
+		$this->cache['blockquote_content'] .= "\n";
+	}
+}
+other {	$this->cache['blockquote_content'] .= $this->value; }
+*/
+/*!lex2php
+%statename LINKSTATE
+linkend {
+	$this->handleString($this->tip->attr['href']);
+	$this->handleString(substr($this->value, 0, -2));
+	$this->closeTag('link');
+	$this->yypopstate();
+}
+linkdivider {
+	$this->yypopstate();
+	$this->yypushstate(self::LINKTEXTSTATE);
+}
+linkurl {$this->tip->attr['href'] = $this->encode(trim($this->value)); }
+*/
+/*!lex2php
+%statename LINKTEXTSTATE
+linkend {
+	$this->handleString(rtrim(substr($this->value, 0, -2)));
+	$this->closeTag('link');
+	$this->yypopstate();
+}
+escape { $this->handleString(substr($this->value, 1)); }
+url { $this->handleString($this->value); }
+wwwurl { $this->handleString($this->value); }
+email { $this->handleString($this->value); }
+bold { $this->handleTag('bold'); }
+italic { $this->handleTag('italic'); }
+mono { $this->handleTag('mono'); }
+sup { $this->handleTag('sup'); }
+sub { $this->handleTag('sub'); }
+underline { $this->handleTag('underline'); }
+nowikistart {
+	$this->openTag('nowiki');
+	$this->yypushstate(self::NOWIKISTATE);
+}
+img { $this->handleImage($this->value); }
+newline { $this->handleString($this->value); }
+other_space { $this->handleString($this->value); }
+*/
+/*!lex2php
+%statename PLUGINSTATE
+pluginname {
+	$this->cache['plugin_tag']->data[0] = $this->value;
+	$this->cache['plugin_tag']->data[1] = array();
+	$this->yypushstate(self::PLUGINATTRSTATE);
+}
+*/
+/*!lex2php
+%statename PLUGINATTRSTATE
+pluginattr {
+	preg_match('#\s+(\w+)(=([a-zA-Z0-9]+|\'(?:\\\'|[^\']+)*\'|"(?:\\"|[^"]+)*"))?#', $this->value, $match);
+	if (isset($match[2]) && strlen($match[2])) {
+		if ($match[3][0] == '"') {
+			$value = str_replace('\\"', '"', substr($match[3], 1, -1));
+		} elseif ($match[3][0] == "'") {
+			$value = str_replace("\\'", "'", substr($match[3], 1, -1));
+		} else {
+			$value = $match[3];
+		}
+	} elseif (!isset($match[2]) || !strlen($match[2])) {
+		$value = TRUE;
+	}
+	$this->cache['plugin_tag']->data[1][$match[1]] = $value;
+}
+pluginend {
+	unset($this->cache['plugin_tag']);
+	$this->yypopstate();
+	$this->yypopstate();
+}
+*/
+/*!lex2php
+%statename NOWIKISTATE
+innowiki { $this->handleString($this->value); }
+newline { $this->handleString($this->value); }
+nowikiend {
+	$this->handleString(substr($this->value, 0, -3));
+	$this->closeTag('nowiki');
+	$this->yypopstate();
+}
+*/
+/*!lex2php
+%statename BLOCKSTATE
+blockend {
+	$this->handleBlockEnd();
+	$this->openTag('p');
+	$this->yypopstate();
+}
+newline { $this->handleString($this->value, $this->cache['block_encode']); }
+other { $this->handleString($this->value, $this->cache['block_encode']); }
+*/
+/*!lex2php
+%statename DEFLISTTERMSTATE
+escape { $this->handleString(substr($this->value, 1)); }
+deflisttermend {
+	$this->closeTag('dt');
+	$this->openTag('dd');
+	$this->yypopstate();
+	$this->yypushstate(self::DEFLISTDEFSTATE); 
+}
+pluginstart { $this->openPlugin(); }
+url { $this->handleURL($this->value); }
+wwwurl { $this->handleDomain($this->value); }
+email { $this->handleEmail($this->value); }
+bold { $this->handleTag('bold'); }
+italic { $this->handleTag('italic'); }
+mono { $this->handleTag('mono'); }
+sup { $this->handleTag('sup'); }
+sub { $this->handleTag('sub'); }
+underline { $this->handleTag('underline'); }
+flourish_class_link { $this->handleFlourishClass($this->value); }
+flourish_method_link { $this->handleFlourishMethod($this->value); }
+flourish_class_method_link { $this->handleFlourishClassMethod($this->value); }
+linkstart {
+	$this->openTag('link');
+	$this->yypushstate(self::LINKSTATE);
+}
+nowikistart {
+	$this->openTag('nowiki');
+	$this->yypushstate(self::NOWIKISTATE);
+}
+img { $this->handleImage($this->value); }
+other_space {	$this->handleString($this->value); }
+*/
+/*!lex2php
+%statename DEFLISTDEFSTATE
+escape { $this->handleString(substr($this->value, 1)); }
+deflistcontinue {
+	$this->closeTag('dd');
+	$this->openTag('dt');
+	$this->yypopstate();
+	$this->yypushstate(self::DEFLISTTERMSTATE);
+}
+deflistnewdef {
+	$this->closeTag('dd');
+	$this->openTag('dd');
+}
+multi_newline {
+	$this->closeTag('dd');
+	$this->closeTag('dl');
+	$this->yypopstate();
+}
+pluginstart { $this->openPlugin(); }
+hr { $this->openTag('hr'); }
+url { $this->handleURL($this->value); }
+wwwurl { $this->handleDomain($this->value); }
+email { $this->handleEmail($this->value); }
+bold { $this->handleTag('bold'); }
+italic { $this->handleTag('italic'); }
+mono { $this->handleTag('mono'); }
+sup { $this->handleTag('sup'); }
+sub { $this->handleTag('sub'); }
+underline { $this->handleTag('underline'); }
+flourish_class_link { $this->handleFlourishClass($this->value); }
+flourish_method_link { $this->handleFlourishMethod($this->value); }
+flourish_class_method_link { $this->handleFlourishClassMethod($this->value); }
+linkstart {
+	$this->openTag('link');
+	$this->yypushstate(self::LINKSTATE);
+}
+blockstart {
+	$dd_pos = $this->getOpenTagPos('dd');
+	$dd     = $this->stack[$dd_pos];
+	
+	$iter = new ParserIterator($dd, 'child');
+	$found_inline = FALSE;
+	foreach ($iter as $child_tag) {
+		if ($child_tag->name != 'p' && $child_tag->name != 'block') {
+			$found_inline = TRUE;
+		}
+	}
+		
+	if ($found_inline) {
+		$this->wrapChildren($dd, 'p');
+	}
+	
+	$this->handleBlockStart($this->value);
+	$this->yypushstate(self::BLOCKSTATE);
+}
+nowikistart {
+	$this->openTag('nowiki');
+	$this->yypushstate(self::NOWIKISTATE);
+}
+img { $this->handleImage($this->value); }
+other_space {	$this->handleString($this->value); }
+*/
+/*!lex2php
+%statename LISTSTATE
+escape { $this->handleString(substr($this->value, 1)); }
+pluginstart { $this->openPlugin(); }
+hr { $this->openTag('hr'); }
+url { $this->handleURL($this->value); }
+wwwurl { $this->handleDomain($this->value); }
+email { $this->handleEmail($this->value); }
+bold { $this->handleTag('bold'); }
+italic { $this->handleTag('italic'); }
+mono { $this->handleTag('mono'); }
+sup { $this->handleTag('sup'); }
+sub { $this->handleTag('sub'); }
+underline { $this->handleTag('underline'); }
+break { $this->openTag('br'); }
+flourish_class_link { $this->handleFlourishClass($this->value); }
+flourish_method_link { $this->handleFlourishMethod($this->value); }
+flourish_class_method_link { $this->handleFlourishClassMethod($this->value); }
+linkstart {
+	$this->openTag('link');
+	$this->yypushstate(self::LINKSTATE);
+}
+nowikistart {
+	$this->openTag('nowiki');
+	$this->yypushstate(self::NOWIKISTATE);
+}
+blockstart {
+	$li_pos = $this->getOpenTagPos('li');
+	$li     = $this->stack[$li_pos];
+	
+	$iter = new ParserIterator($li, 'child');
+	$found_inline = FALSE;
+	foreach ($iter as $child_tag) {
+		if ($child_tag->name != 'p' && $child_tag->name != 'block') {
+			$found_inline = TRUE;
+		}
+	}
+		
+	if ($found_inline) {
+		$this->wrapChildren($li, 'p');
+	}
+	
+	$this->handleBlockStart($this->value);
+	$this->yypushstate(self::BLOCKSTATE);
+}
+img { $this->handleImage($this->value); }
+listparagraph {
+	$li_pos = $this->getOpenTagPos('li');
+	$li     = $this->stack[$li_pos];
+	
+	$iter = new ParserIterator($li, 'child');
+	$found_inline = FALSE;
+	foreach ($iter as $child_tag) {
+		if ($child_tag->name != 'p' && $child_tag->name != 'block') {
+			$found_inline = TRUE;
+		}
+	}
+		
+	if ($found_inline) {
+		$this->wrapChildren($li, 'p');
+	}
+	
+	$this->closeTag('p');
+	$this->openTag('p');
+}
+listitemcontinue { $this->handleString(' '); }
+listcontinue {
+	$value = substr($this->value, 1);
+	$value = str_replace("\t", "    ", $value);
+	
+	$indent_level = strlen($value) - strlen(ltrim($value));
+	
+	$old_lists = '';
+	foreach ($this->stack as $tag) {
+		if ($tag->name == 'ul') {
+			$old_lists .= '*';
+		} elseif ($tag->name == 'ol') {
+			$old_lists .= '#';
+		}
+	}
+	
+	$value = str_replace(array('-', '+'), '*', $value);
+	$value = preg_replace('#\d+\.#', '#', $value);
+	
+	if (strlen(trim($value)) == 1) {
+		if ($indent_level > end($this->cache['list_ws_stack'])) {
+			$this->cache['list_ws_stack'][] = $indent_level;
+			$value = $old_lists . trim($value);
+		} elseif ($indent_level < end($this->cache['list_ws_stack'])) {
+			$bullet_prefix = substr($old_lists, 0, -1);
+			while ($indent_level < end($this->cache['list_ws_stack'])) {
+				$bullet_prefix = substr($bullet_prefix, 0, -1);
+				array_pop($this->cache['list_ws_stack']);
+			}
+			$value = $bullet_prefix . trim($value);
+		} elseif (count($this->cache['list_ws_stack']) > 1) {
+			$value = substr($old_lists, 0, -1) . trim($value);
+		}
+	}
+	
+	$new_lists = trim($value);
+	
+	$add = FALSE;
+	while (strlen($new_lists) < strlen($old_lists) || ($old_lists && substr($new_lists, 0, strlen($old_lists)) != $old_lists)) {
+		$type = substr($old_lists, -1);
+		if ($type == '*') {
+			$this->closeTag('li');
+			$this->closeTag('ul');
+		} elseif ($type == '#') {
+			$this->closeTag('li');
+			$this->closeTag('ol');
+		}
+		$old_lists = substr($old_lists, 0, -1);
+	}
+	
+	$cur_lists = $old_lists;
+	while ($cur_lists != $new_lists) {
+		$add  = TRUE;
+		$type = substr($new_lists, strlen($cur_lists), 1);
+		if ($type == '*') {
+			$this->openTag('ul');
+			$this->openTag('li');
+		} else {
+			$this->openTag('ol');
+			$this->openTag('li');
+		}
+		$cur_lists .= $type;
+	}
+	
+	if (!$add) {
+		$this->closeTag('li');
+		$this->openTag('li');
+	}
+}
+multi_newline {
+	do {
+		$ul_pos = $this->getOpenTagPos('ul');
+		$ol_pos = $this->getOpenTagPos('ol');
+		$pos = $ul_pos !== FALSE || $ol_pos !== FALSE;
+		if ($pos) {
+			$this->closeTag('li');
+			$this->closeTag($ul_pos > $ol_pos ? 'ul' : 'ol');
+		}
+	} while ($pos);
+	
+	unset($this->cache['list_ws_stack']);
+	
+	$this->yypopstate();
+}
+other_space { $this->handleString($this->value); }
+*/
+/*!lex2php
+%statename TABLESTATE
+tableborder {
+	$this->cache['table_line']++;
+	$row_border = strlen($this->value) > 1 && $this->value[1] == '-';
+	if ($this->value[0] == '|' && !$row_border && empty($this->cache['in_large_row'])) {
+		if (empty($this->cache['rows'])) {
+			$this->cache['rows'] = array(0 => array());
+			$this->cache['current_row'] = 0;
+			$this->cache['current_cell_rows'] = array();
+		} else {
+			$this->cache['rows'][] = array();
+			$this->cache['current_row']++;
+			$this->cache['current_cell_rows'][0] = $this->cache['current_row'];
+		}
+	}
+	
+	$this->cache['current_cell'] = -1;
+	$this->yypushstate(self::CELLSTATE);
+	return TRUE;
+}
+multi_newline {
+	// At the end of the table, we get rid of the last row if it is empty
+	$rows = $this->cache['rows'];
+	$rows = array_filter($rows);
+	$rows = array_values($rows);
+	
+	unset($this->cache['rows']);
+	unset($this->cache['table_line']);
+	unset($this->cache['current_row']);
+	unset($this->cache['current_cell']);
+	unset($this->cache['current_cell_rows']);
+	unset($this->cache['in_large_row']);
+	
+	$max_columns = 0;
+	$min_columns = 1000000;
+	$max_rows    = count($rows);
+	$same_widths = TRUE;
+	
+	// Remove completely empty cells to prevent mistakes with | and + in the
+	// middle of row separator
+	foreach ($rows as $i => $row) {
+		foreach ($row as $j => $cell) {
+			if ($rows[$i][$j]['type'] === 'temp') {
+				unset($rows[$i][$j]);
+			}
+		}
+	}
+	
+	for ($i=0; $i<$max_rows; $i++) {
+		ksort($rows[$i]);
+	}
+	
+	// Determine if we need to check for colspans
+	foreach ($rows as $row) {
+		$max_columns = max($max_columns, count($row));
+		$min_columns = min($min_columns, count($row));
+	}
+	
+	// If there appears to be a colspan going on, determine it
+	if ($min_columns != $max_columns) {
+		$avg_col_widths = array();
+		$cols_factored  = 0;
+		foreach ($rows as $i => $row) {
+			// We don't use smaller rows to create the average since they probably have colspans
+			if (count($row) != $max_columns) {
+				continue;
+			}
+			
+			foreach ($row as $j => $cell) {
+				// Placeholders are skipped since they don't have any content
+				if ($cell['type'] == 'placeholder') {
+					continue;
+				}
+				
+				$width = max(array_map('strlen', explode("\n", $cell['content'])));
+				if (!$cols_factored) {
+					$avg_col_widths[$j] = $width;
+				} else {
+					$avg_col_widths[$j] = (int) ((($cols_factored * $avg_col_widths[$j]) + $width)/($cols_factored + 1));
+				}
+			}
+			$cols_factored++;
+		}
+		
+		foreach ($rows as $i => $row) {
+			// We don't need to adjust rows with all columns
+			if (count($row) == $max_columns) {
+				continue;
+			}
+			
+			$total_span = 0;
+			foreach ($row as $j => $cell) {
+				if ($cell['type'] == 'placeholder') {
+					continue;
+				}
+				
+				$width = max(array_map('strlen', explode("\n", $cell['content'])));
+				$closest_multiple = 0;
+				$closest_width    = 100000;
+				for ($k=1; $k<$max_columns+1-$j; $k++) {
+					$width_of_multiple = $this->getTotalWidth($avg_col_widths, $j, $k);
+					if (abs($width - $width_of_multiple) < abs($width - $closest_width)) {
+						$closest_multiple = $k;
+						$closest_width    = $width_of_multiple;
+					}
+				}
+				$rows[$i][$j]['colspan'] = $closest_multiple;
+				$total_span += $rows[$i][$j]['colspan'];
+			}
+			
+			if (count($row)) {
+				$l = 0;
+				while ($total_span < $max_columns) {
+					if (!isset($rows[$i][$l])) {
+						print_r($rows[$i]);
+						die;
+					}
+					if ($rows[$i][$l]['colspan'] > 1) {
+						$rows[$i][$l]['colspan']++;
+						$total_span++;
+					}
+					$l++;
+					if ($l >= count($row)) {
+						$l = 0;
+					}
+				}
+				
+				$m = 0;
+				while ($total_span > $max_columns) {
+					if ($rows[$i][$m]['colspan'] > 1) {
+						$rows[$i][$m]['colspan']--;
+						$total_span--;
+					}
+					$m++;
+					if ($m >= count($row)) {
+						$m = 0;
+					}
+				}
+			}
+		}
+	}
+	
+	foreach ($rows as $row) {
+		$this->openTag('tr');
+		foreach ($row as $cell) {
+			if ($cell['type'] == 'placeholder') {
+				continue;
+			}
+			
+			$this->openTag($cell['type']);
+			if ($cell['rowspan'] != 1) {
+				$this->tip->attr['rowspan'] = $cell['rowspan'];
+			}
+			if ($cell['colspan'] != 1) {
+				$this->tip->attr['colspan'] = $cell['colspan'];
+			}
+			if ($cell['align'] != 'left') {
+				$this->tip->attr['class'] = 'align_' . $cell['align'];
+			}
+			
+			// This out-dents the content of the cell by the greatest common indent
+			$content_lines = explode("\n", rtrim($cell['content'], "\n"));
+			$min_indent = 100000;
+			foreach ($content_lines as $content_line) {
+				if ($content_line === '') {
+					continue;
+				}
+				if (preg_match('#^[ \t]+(?=$|[^ \t])#', $content_line, $match)) {
+					$min_indent = min($min_indent, strlen(str_replace("\t", "    ", $match[0])));
+				} else {
+					$min_indent = 0;
+				}
+			}
+			
+			$new_content_lines = array();
+			foreach ($content_lines as $content_line) {
+				$new_content_lines[] = rtrim(substr($content_line, $min_indent));
+			}
+			$content_lines = $new_content_lines;
+			
+			$content_parser = new self(join("\n", $content_lines), $this->data);
+			$descendants = $content_parser->parse();
+			if (count($descendants->children) == 1 && $descendants->children[0]->name == 'p') {
+				$descendants = $descendants->children[0];
+			}
+			foreach (new ParserIterator($descendants) as $decendant) {
+				$decendant->index = $this->index_counter++;
+			}
+			
+			// Make sure all cells have some content
+			if ($descendants->children == array()) {
+				$descendants->children = array(
+					(object) array(
+						'name' => 'string',
+						'data' => array('')
+					)
+				);
+			}
+			
+			$this->tip->children = $descendants->children;
+			
+			$this->closeTag($cell['type']);
+		}
+		$this->closeTag('tr');
+	}
+	$this->closeTag('table');
+	
+	$this->yypopstate();
+}
+*/
+/*!lex2php
+%statename CELLSTATE
+nowikistart { $this->handleCell(); }
+link { $this->handleCell(); }
+img { $this->handleCell(); }
+tablebordercontinue { $this->yypopstate(); }
+tableborderend { $this->yypopstate(); }
+tablecontinue { $this->yypopstate(); }
+multi_newline {
+	$this->yypopstate();
+	return TRUE;
+}
+tableborder {	
+	// Handle new rows
+	$row_border = strlen($this->value) > 1 && $this->value[1] == '-';
+	if ($row_border) {
+		$current_cell = $this->cache['current_cell'] + 1;
+		
+		if (empty($this->cache['rows'])) {
+			$this->cache['rows'] = array(0 => array());
+			$this->cache['current_row'] = 0;
+			$this->cache['current_cell'] = -1;
+			$this->cache['current_cell_rows'] = array();
+		} else {
+			$this->cache['rows'][] = array();
+			$this->cache['current_row']++;
+			$this->cache['current_cell'] = -1;
+		}
+		
+		$current_row  = $this->cache['current_row'];
+		
+		$leaving_large_row = $this->value[0] == '|' && isset($this->cache['in_large_row']);
+		
+		if (!$leaving_large_row) {
+			$cell_markers = preg_match_all('#[|+]#', $this->value, $matches);
+			for ($num=0; $num<$cell_markers; $num++) {
+				$this->cache['rows'][$current_row][$current_cell+$num] = array('content' => '', 'type' => 'temp', 'align' => 'left', 'rowspan' => 1, 'colspan' => 1, 'line' => $this->cache['table_line']+1);
+				$this->cache['current_cell_rows'][$current_cell+$num] = $current_row;
+				$this->cache['current_cell']++;
+			}
+		}
+		
+		if ($leaving_large_row) {
+			unset($this->cache['in_large_row']);
+		} else {
+			$this->cache['in_large_row'] = TRUE;
+		}
+		return;
+	}
+	
+	$current_row  = $this->cache['current_row'];
+	if ($current_row == 0 || $this->cache['current_cell'] < max(array_keys($this->cache['current_cell_rows']))) {
+		$this->cache['current_cell']++;
+	}
+	$current_cell = $this->cache['current_cell'];
+	
+	if ($current_row == 0) {
+		$this->cache['current_cell_rows'][$current_cell] = 0;
+	}
+	
+	if (empty($this->cache['in_large_row'])) {
+		$this->cache['rows'][$current_row][$current_cell] = array('content' => '', 'type' => 'td', 'align' => 'left', 'rowspan' => 1, 'colspan' => 1, 'line' => $this->cache['table_line']);
+		$this->cache['current_cell_rows'][$current_cell] = $this->cache['current_row'];
+	}
+	
+	// In this situation we have one or more formatting characters to parse
+	if (strlen($this->value) > 1 && $this->value[1] != '-') {
+		$format = substr($this->value, 1);
+		$this->cache['rows'][$current_row][$current_cell]['content'] = str_pad('', strlen($format), ' ');
+		if ($format[0] == '=') {
+			$this->cache['rows'][$current_row][$current_cell]['type'] = 'th';
+		}
+		if (preg_match('#>$#', $format)) {
+			$this->cache['rows'][$current_row][$current_cell]['align'] = 'right';
+		} elseif (preg_match('#~$#', $format)) {
+			$this->cache['rows'][$current_row][$current_cell]['align'] = 'center';
+		}
+	}
+}
+other { $this->handleCell(); }
+*/
+}
