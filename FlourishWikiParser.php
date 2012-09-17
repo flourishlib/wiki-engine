@@ -101,6 +101,10 @@ class FlourishWikiParser extends WikiParser
 	protected function handleFlourishMethod($string)
 	{
 		$method_name = preg_replace('#^::(.*)\(\)$#', '\1', $string);
+		if (!isset($this->data['flourish_class'])) {
+			$this->handleString($string);
+			return;
+		}
 		$class_name  = $this->data['flourish_class'];
 		$this->openTag('link', array('href' => '/api/' . $class_name . '#' . $method_name));
 		$this->openTag('mono');
