@@ -203,7 +203,7 @@ url = #https?://[a-zA-Z0-9%\$\-_.+!*;/?:@=&\'\#,]+[a-zA-Z0-9\$\-_+!*;/?:@=&\'\#,
 wwwurl = #www\.(?:[a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}(?:/[a-zA-Z0-9%\$\-_.+!*;/?:@=&\'\#,]+[a-zA-Z0-9\$\-_+!*;/?:@=&\'\#,])?#
 email = #([a-zA-Z0-9\\.+\'_\\-]+@(?:[a-zA-Z0-9\\-]+\.)+[a-zA-Z]{2,})#
 link = #\[((?!\]| ).)+(?: (?:(?!\]).)+)?\]#
-linkstart = #\[#
+linkstart = #\[(?!\])#
 linkurl = #((?!\]| ).)+#
 linkdivider = #\s+#
 linkend = #\s*\]+#
@@ -409,7 +409,12 @@ other {	$this->cache['blockquote_content'] .= $this->value; }
 /*!lex2php
 %statename LINKSTATE
 linkend {
-	$this->handleString($this->tip->attr['href']);
+	if (array_key_exists('href', $this->tip->attr)) {
+		$href = $this->tip->attr['href'];
+	} else {
+		$href = '';
+	}
+	$this->handleString($href);
 	$this->handleString(substr($this->value, 0, -2));
 	$this->closeTag('link');
 	$this->yypopstate();
